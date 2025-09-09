@@ -1,0 +1,111 @@
+
+import Libbox
+import Library
+import SwiftUI
+
+@MainActor
+public struct CoreView: View {
+    @State private var isLoading = true
+
+    @State private var disableDeprecatedWarnings = false
+
+    @State private var version = ""
+    @State private var dataSize = ""
+
+    public init() {}
+    public var body: some View {
+        viewBuilder {
+            if isLoading {
+                ProgressView().onAppear {
+                    Task {
+                        await loadSettings()
+                    }
+                }
+            } else {
+                FormView {
+                    FormTextItem("Version", version)
+                    FormTextItem("Data Size", dataSize)
+
+                    if Variant.isBeta {
+                        Section {}
+                        FormToggle("Disable Deprecated Warnings", "Do not show warnings about usages of deprecated features.", $disableDeprecatedWarnings) { newValue in
+                            await SharedPreferences.disableDeprecatedWarnings.set(newValue)
+                        }
+                    }
+
+                    Section("Working Directory") {
+                        #if os(macOS)
+                            FormButton {
+                                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: FilePath.workingDirectory.relativePath)
+                            } label: {
+                                Label("Open", systemImage: "macwindow.and.cursorarrow")
+                            }
+                        #endif
+                        FormButton(role: .destructive) {
+                            Task {
+                                await destroyWorkingDirectory()
+                            }
+                        } label: {
+                            Label("Destroy", systemImage: "trash.fill")
+                        }
+                        .foregroundColor(.red)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Core")
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+        #endif
+    }
+
+    private nonisolated func loadSettings() async {
+        if ApplicationLibrary.inPreview {
+            await MainActor.run {
+                version = "<redacted>"
+                dataSize = LibboxFormatBytes(1000 * 1000 * 10)
+                isLoading = false
+            }
+        } else {
+            await MainActor.run {
+                version = LibboxVersion()
+                dataSize = "Loading..."
+                isLoading = false
+            }
+            await loadSettingsBackground()
+        }
+    }
+
+    private nonisolated func loadSettingsBackground() async {
+        let disableDeprecatedWarnings = await SharedPreferences.disableDeprecatedWarnings.get()
+        let dataSize = (try? FilePath.workingDirectory.formattedSize()) ?? "Unknown"
+        await MainActor.run {
+            self.disableDeprecatedWarnings = disableDeprecatedWarnings
+            self.dataSize = dataSize
+        }
+    }
+
+    private nonisolated func destroyWorkingDirectory() async {
+        try? FileManager.default.removeItem(at: FilePath.workingDirectory)
+        await MainActor.run {
+            isLoading = true
+        }
+    }
+}
+
+private extension URL {
+    func formattedSize() throws -> String? {
+        guard let urls = FileManager.default.enumerator(at: self, includingPropertiesForKeys: nil)?.allObjects as? [URL] else {
+            return nil
+        }
+        let size = try urls.lazy.reduce(0) {
+            try ($1.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize ?? 0) + $0
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        guard let byteCount = formatter.string(for: size) else {
+            return nil
+        }
+        return byteCount
+    }
+}
